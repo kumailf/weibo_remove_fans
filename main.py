@@ -307,11 +307,38 @@ def card_candidate(card: Locator) -> Candidate | None:
 
 
 def scroll_once(page: Page) -> None:
-    """预加载：快速上滑半屏，再继续下滑加载更多。"""
+    """预加载：先把末尾卡片滚入视野触发加载，再上滑半屏并落底。"""
+    cards = page.locator(CARD_SELECTOR)
+    if cards.count() > 0:
+        try:
+            cards.last.scroll_into_view_if_needed(timeout=2000)
+        except Exception:
+            pass
     page.evaluate("window.scrollBy(0, -Math.floor(window.innerHeight * 0.5))")
-    page.wait_for_timeout(120)
-    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    page.wait_for_timeout(150)
+    page.evaluate(
+        """() => {
+            const roots = [
+                document.scrollingElement,
+                document.documentElement,
+                document.body,
+            ];
+            for (const el of roots) {
+                if (el) el.scrollTop = el.scrollHeight;
+            }
+            window.scrollTo(0, Math.max(
+                document.body.scrollHeight,
+                document.documentElement.scrollHeight
+            ));
+        }"""
+    )
     page.wait_for_timeout(2000)
+    if cards.count() > 0:
+        try:
+            cards.last.scroll_into_view_if_needed(timeout=2000)
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
 
 
 def scroll_one_screen(page: Page) -> None:
