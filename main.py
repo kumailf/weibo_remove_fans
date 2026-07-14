@@ -307,7 +307,7 @@ def card_candidate(card: Locator) -> Candidate | None:
 
 
 def scroll_once(page: Page) -> None:
-    """每轮扫描后：快速上滑半屏，再继续下滑加载。"""
+    """预加载：快速上滑半屏，再继续下滑加载更多。"""
     page.evaluate("window.scrollBy(0, -Math.floor(window.innerHeight * 0.5))")
     page.wait_for_timeout(120)
     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -315,9 +315,9 @@ def scroll_once(page: Page) -> None:
 
 
 def scroll_one_screen(page: Page) -> None:
-    """逐屏向下定位虚拟列表中的已锁定候选，避免直接跳过中间卡片。"""
+    """逐屏向下，用于顶部顺序扫描与取关定位。"""
     page.evaluate("window.scrollBy(0, Math.max(400, window.innerHeight * 0.8))")
-    page.wait_for_timeout(250)
+    page.wait_for_timeout(350)
 
 
 def visible_card_indices_top_to_bottom(page: Page) -> list[int]:
@@ -331,6 +331,46 @@ def visible_card_indices_top_to_bottom(page: Page) -> list[int]:
                 .map((item) => item.index);
         }}"""
     )
+
+
+def harvest_visible_uids(page: Page) -> set[str]:
+    """收集当前视口卡片中的 UID（用于预加载进度，不区分是否匹配规则）。"""
+    hrefs: list[str] = page.evaluate(
+        f"""() => Array.from(document.querySelectorAll({CARD_SELECTOR!r} + ' a[href]'))
+            .map((a) => a.href || '')"""
+    )
+    uids: set[str] = set()
+    for href in hrefs:
+        uid = extract_uid("", [href])
+        if uid:
+            uids.add(uid)
+    return uids
+
+
+def preload_fan_list(page: Page, max_scrolls: int) -> int:
+    """先把粉丝列表下拉加载完，不解析候选规则。"""
+    seen: set[str] = set()
+    stagnant_rounds = 0
+    last_count = 0
+
+    page.evaluate("window.scrollTo(0, 0)")
+    page.wait_for_timeout(400)
+
+    for round_no in range(max_scrolls + 1):
+        seen |= harvest_visible_uids(page)
+        print(f"预加载轮次 {round_no + 1}：已载入约 {len(seen)} 个粉丝")
+        if round_no == max_scrolls:
+            break
+        if len(seen) == last_count:
+            stagnant_rounds += 1
+        else:
+            stagnant_rounds = 0
+        last_count = len(seen)
+        if stagnant_rounds >= 3:
+            print(f"连续 {stagnant_rounds} 轮粉丝数未增加，预加载结束。")
+            break
+        scroll_once(page)
+    return len(seen)
 
 
 def card_has_uid(card: Locator, uid: str) -> bool:
@@ -371,23 +411,22 @@ def find_card_for_uid(
     return None
 
 
-def collect_candidates(
+def scan_candidates_from_top(
     page: Page, max_scrolls: int, stop_after: int | None = None
 ) -> list[Candidate]:
+    """回顶后逐屏扫描，按关注时间倒序收集匹配候选。"""
     found: dict[str, Candidate] = {}
     stagnant_rounds = 0
     last_found = 0
 
-    # 关注时间倒序：从顶部开始，保证首次发现顺序即从新到旧。
     page.evaluate("window.scrollTo(0, 0)")
-    page.wait_for_timeout(400)
+    page.wait_for_timeout(800)
 
     for round_no in range(max_scrolls + 1):
         cards = page.locator(CARD_SELECTOR)
         for index in visible_card_indices_top_to_bottom(page):
             card = cards.nth(index)
             try:
-                # 先用链接快速跳过已收录候选，减少每轮完整解析开销。
                 hrefs = card.locator("a[href]").evaluate_all(
                     "els => els.map(e => e.href)"
                 )
@@ -406,7 +445,6 @@ def collect_candidates(
         if round_no == max_scrolls:
             break
 
-        # 虚拟列表高度会抖动，不能用高度判断到底；只看候选数是否增长。
         if len(found) == last_found:
             stagnant_rounds += 1
         else:
@@ -416,9 +454,19 @@ def collect_candidates(
             print(f"连续 {stagnant_rounds} 轮候选未增加，结束扫描。")
             break
 
-        # 每轮扫描后：快速上滑半屏，再继续下滑加载。
-        scroll_once(page)
+        scroll_one_screen(page)
     return list(found.values())
+
+
+def collect_candidates(
+    page: Page, max_scrolls: int, stop_after: int | None = None
+) -> list[Candidate]:
+    """两阶段：先下拉加载完毕，再回顶按顺序一次性扫描候选。"""
+    print("阶段 1/2：下拉加载粉丝列表……")
+    loaded = preload_fan_list(page, max_scrolls)
+    print(f"预加载完成，约 {loaded} 个粉丝卡片已载入。")
+    print("阶段 2/2：回到顶部，按关注时间倒序扫描候选……")
+    return scan_candidates_from_top(page, max_scrolls, stop_after=stop_after)
 
 
 def write_candidates(candidates: list[Candidate]) -> None:
