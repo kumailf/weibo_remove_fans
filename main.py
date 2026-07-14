@@ -404,8 +404,9 @@ def find_card_for_uid(
 ) -> Locator | None:
     """定位指定候选。
 
-    默认不回顶：前几页经常是无需移除的正常粉丝，移除后应在当前位置等待刷新，
-    再继续往下找下一位；只有整轮开始时才从顶部对齐。
+    1. 默认先在当前位置等待刷新重试（移除后列表会上移）；
+    2. 仍找不到则回到顶部，再逐屏往下找。
+    整轮第一个候选可直接 from_top=True。
     """
 
     def scan_visible() -> Locator | None:
@@ -419,23 +420,31 @@ def find_card_for_uid(
                 continue
         return None
 
-    if from_top:
+    def search_down_from_top() -> Locator | None:
         page.evaluate("window.scrollTo(0, 0)")
         page.wait_for_timeout(400)
+        matched = scan_visible()
+        if matched is not None:
+            return matched
+        for _ in range(max_search_steps):
+            scroll_one_screen(page)
+            matched = scan_visible()
+            if matched is not None:
+                return matched
+        return None
 
-    # 先在当前位置等列表刷新（移除后卡片会上移），不要先回顶。
+    if from_top:
+        return search_down_from_top()
+
+    # 先在当前位置等列表刷新，不要立刻回顶。
     for _ in range(5):
         matched = scan_visible()
         if matched is not None:
             return matched
         page.wait_for_timeout(350)
 
-    for _ in range(max_search_steps):
-        scroll_one_screen(page)
-        matched = scan_visible()
-        if matched is not None:
-            return matched
-    return None
+    # 当前位置没有：从顶部重新往下翻找。
+    return search_down_from_top()
 
 
 def scan_candidates_from_top(
