@@ -293,10 +293,32 @@ def scroll_once(page: Page) -> None:
     page.wait_for_timeout(9000)
 
 
-def scroll_nudge_up(page: Page) -> None:
-    """微博列表偶发“加载中”卡住时，向上轻滑一次通常能解除。"""
-    page.evaluate("window.scrollBy(0, -Math.max(300, window.innerHeight * 0.5))")
-    page.wait_for_timeout(1500)
+def unstick_fan_list(page: Page, level: int) -> None:
+    """打断卡在底部哨兵的无限加载。
+
+    仅靠小幅上滑常常不够：加载中状态要求视口明显离开底部。
+    level 越大，离开底部越远（约 3 屏 → 页面中部 → 接近顶部）。
+    """
+    page.evaluate(
+        """(level) => {
+            const h = Math.max(
+                document.body.scrollHeight,
+                document.documentElement.scrollHeight
+            );
+            const vh = window.innerHeight;
+            let y;
+            if (level <= 1) {
+                y = Math.max(0, h - vh * 3.5);
+            } else if (level === 2) {
+                y = Math.max(0, Math.floor(h * 0.45));
+            } else {
+                y = Math.min(vh, Math.max(0, Math.floor(h * 0.05)));
+            }
+            window.scrollTo(0, y);
+        }""",
+        level,
+    )
+    page.wait_for_timeout(2000 + level * 800)
 
 
 def scroll_one_screen(page: Page) -> None:
@@ -312,7 +334,8 @@ def collect_candidates(
     stagnant_rounds = 0
     last_height = 0
     last_found = 0
-    pending_nudge = False
+    unstick_level = 0
+    max_unstick_level = 3
 
     for round_no in range(max_scrolls + 1):
         cards = page.locator(CARD_SELECTOR)
@@ -330,21 +353,26 @@ def collect_candidates(
         if round_no == max_scrolls:
             break
 
-        height = page.evaluate("document.body.scrollHeight")
+        height = page.evaluate(
+            "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
+        )
         no_progress = height == last_height and len(found) == last_found
         if no_progress:
-            if not pending_nudge:
-                # 高度与候选都未增长时，先向上滑一次再继续下拉，避免加载卡住误判到底。
-                print("列表未增长，尝试向上滑动以解除加载卡住……")
-                scroll_nudge_up(page)
-                pending_nudge = True
+            if unstick_level < max_unstick_level:
+                unstick_level += 1
+                print(
+                    f"列表未增长，第 {unstick_level}/{max_unstick_level} 次"
+                    "离开底部以解除加载卡住……"
+                )
+                unstick_fan_list(page, unstick_level)
                 scroll_once(page)
                 continue
+            # 三档解锁都无效，才记为一次真正的停滞。
             stagnant_rounds += 1
-            pending_nudge = False
+            unstick_level = 0
         else:
             stagnant_rounds = 0
-            pending_nudge = False
+            unstick_level = 0
 
         if stagnant_rounds >= 3:
             break
