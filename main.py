@@ -94,8 +94,8 @@ def launch_context(playwright) -> BrowserContext:
             str(PROFILE_DIR.resolve()),
             headless=False,
             channel="chrome",
-            viewport={"width": 1152, "height": 768},
-            args=["--window-size=1152,768"],
+            no_viewport=True,
+            args=["--start-maximized"],
         )
     except Exception as exc:
         raise RuntimeError(
@@ -289,7 +289,8 @@ def card_candidate(card: Locator) -> Candidate | None:
 
 def scroll_once(page: Page) -> None:
     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    page.wait_for_timeout(1400)
+    # 首次扫描时给微博的异步列表足够时间加载，避免过早判断已经到底。
+    page.wait_for_timeout(3000)
 
 
 def scroll_one_screen(page: Page) -> None:
