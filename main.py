@@ -320,6 +320,19 @@ def scroll_one_screen(page: Page) -> None:
     page.wait_for_timeout(250)
 
 
+def visible_card_indices_top_to_bottom(page: Page) -> list[int]:
+    """按屏幕纵向位置从上到下返回当前卡片索引（贴合关注时间倒序）。"""
+    return page.evaluate(
+        f"""() => {{
+            const cards = Array.from(document.querySelectorAll({CARD_SELECTOR!r}));
+            return cards
+                .map((el, index) => ({{ index, y: el.getBoundingClientRect().top }}))
+                .sort((a, b) => a.y - b.y)
+                .map((item) => item.index);
+        }}"""
+    )
+
+
 def card_has_uid(card: Locator, uid: str) -> bool:
     """快速判断卡片是否对应该 UID，避免每次都做完整文案解析。"""
     return (
@@ -333,11 +346,11 @@ def card_has_uid(card: Locator, uid: str) -> bool:
 def find_card_for_uid(
     page: Page, uid: str, max_search_steps: int
 ) -> Locator | None:
-    """优先在当前视口找卡；找不到再向下翻。勿每轮回顶，否则取关会极慢。"""
+    """始终从列表顶部向下找，保证与时间倒序名单顺序一致，避免跳到中间乱找。"""
 
     def scan_visible() -> Locator | None:
         cards = page.locator(CARD_SELECTOR)
-        for index in range(cards.count()):
+        for index in visible_card_indices_top_to_bottom(page):
             card = cards.nth(index)
             try:
                 if card_has_uid(card, uid):
@@ -346,27 +359,15 @@ def find_card_for_uid(
                 continue
         return None
 
-    matched = scan_visible()
-    if matched is not None:
-        return matched
-
-    for _ in range(max_search_steps):
-        scroll_one_screen(page)
-        matched = scan_visible()
-        if matched is not None:
-            return matched
-
-    # 当前位置找不到时再从顶部扫一遍，覆盖列表回弹或错位。
     page.evaluate("window.scrollTo(0, 0)")
     page.wait_for_timeout(300)
-    matched = scan_visible()
-    if matched is not None:
-        return matched
-    for _ in range(max_search_steps):
-        scroll_one_screen(page)
+    for attempt in range(max_search_steps + 1):
         matched = scan_visible()
         if matched is not None:
             return matched
+        if attempt == max_search_steps:
+            break
+        scroll_one_screen(page)
     return None
 
 
@@ -377,9 +378,13 @@ def collect_candidates(
     stagnant_rounds = 0
     last_found = 0
 
+    # 关注时间倒序：从顶部开始，保证首次发现顺序即从新到旧。
+    page.evaluate("window.scrollTo(0, 0)")
+    page.wait_for_timeout(400)
+
     for round_no in range(max_scrolls + 1):
         cards = page.locator(CARD_SELECTOR)
-        for index in range(cards.count()):
+        for index in visible_card_indices_top_to_bottom(page):
             card = cards.nth(index)
             try:
                 # 先用链接快速跳过已收录候选，减少每轮完整解析开销。
@@ -513,17 +518,15 @@ def clean_candidates(
     removed_before: int = 0,
     target_total: int | None = None,
 ) -> tuple[int, int]:
-    """处理锁定的候选名单；成功移除后立即从名单落盘删除，便于失败后直接续跑。"""
+    """按名单顺序移除；每次都从顶部向下定位，保持与关注时间倒序一致。"""
     removed = 0
     checked = 0
     locked_count = len(candidates)
-    # 先回顶一次；之后按列表顺序就地继续找，避免每人都从顶部翻起。
-    page.evaluate("window.scrollTo(0, 0)")
-    page.wait_for_timeout(400)
 
     for expected in list(candidates):
         if target_total is not None and removed_before + removed >= target_total:
             break
+        # 名单下一位对应列表更靠上/靠前的位置；移除后也从顶部重新对齐，避免跳到中间。
         max_search_steps = max(8, min(40, locked_count * 2))
         matched_card = find_card_for_uid(page, expected.uid, max_search_steps)
 
