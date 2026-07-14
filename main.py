@@ -292,6 +292,12 @@ def scroll_once(page: Page) -> None:
     page.wait_for_timeout(1400)
 
 
+def scroll_one_screen(page: Page) -> None:
+    """逐屏向下定位虚拟列表中的已锁定候选，避免直接跳过中间卡片。"""
+    page.evaluate("window.scrollBy(0, Math.max(400, window.innerHeight * 0.8))")
+    page.wait_for_timeout(500)
+
+
 def collect_candidates(
     page: Page, max_scrolls: int, stop_after: int | None = None
 ) -> list[Candidate]:
@@ -410,8 +416,11 @@ def clean_candidates(
         if expected.uid in whitelist:
             continue
         matched_card = None
-        # 虚拟列表只保留可见区域附近的卡片。最多向下查找 5 次，避免无限滚动。
-        for attempt in range(6):
+        # 每个候选都从顶部逐屏向下定位。上限与本批人数相关，绝不无限滚动。
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(500)
+        max_search_steps = max(12, len(candidates) * 3)
+        for attempt in range(max_search_steps + 1):
             cards = page.locator(CARD_SELECTOR)
             for index in range(cards.count()):
                 card = cards.nth(index)
@@ -423,13 +432,16 @@ def clean_candidates(
                 if candidate and candidate.uid == expected.uid:
                     matched_card = card
                     break
-            if matched_card is not None or attempt == 5:
+            if matched_card is not None or attempt == max_search_steps:
                 break
-            scroll_once(page)
+            scroll_one_screen(page)
 
         checked += 1
         if matched_card is None:
-            print(f"停止：有限滚动后仍找不到锁定候选 {expected.name}。")
+            print(
+                f"停止：从顶部逐屏查找 {max_search_steps} 次后仍找不到锁定候选 "
+                f"{expected.name}。"
+            )
             break
         try:
             remove_card(page, matched_card)
