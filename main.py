@@ -290,7 +290,7 @@ def card_candidate(card: Locator) -> Candidate | None:
 def scroll_once(page: Page) -> None:
     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
     # 首次扫描时给微博的异步列表足够时间加载，避免过早判断已经到底。
-    page.wait_for_timeout(3000)
+    page.wait_for_timeout(9000)
 
 
 def scroll_one_screen(page: Page) -> None:
