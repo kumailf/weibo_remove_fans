@@ -288,36 +288,10 @@ def card_candidate(card: Locator) -> Candidate | None:
 
 
 def scroll_once(page: Page) -> None:
+    """每轮扫描后：快速上滑半屏，再继续下滑加载。"""
+    page.evaluate("window.scrollBy(0, -Math.floor(window.innerHeight * 0.5))")
+    page.wait_for_timeout(120)
     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    # 给微博异步列表一点时间加载新卡片。
-    page.wait_for_timeout(2000)
-
-
-def unstick_fan_list(page: Page, level: int) -> None:
-    """打断卡在底部哨兵的无限加载。
-
-    仅靠小幅上滑常常不够：加载中状态要求视口明显离开底部。
-    level 越大，离开底部越远（约 3 屏 → 页面中部 → 接近顶部）。
-    """
-    page.evaluate(
-        """(level) => {
-            const h = Math.max(
-                document.body.scrollHeight,
-                document.documentElement.scrollHeight
-            );
-            const vh = window.innerHeight;
-            let y;
-            if (level <= 1) {
-                y = Math.max(0, h - vh * 3.5);
-            } else if (level === 2) {
-                y = Math.max(0, Math.floor(h * 0.45));
-            } else {
-                y = Math.min(vh, Math.max(0, Math.floor(h * 0.05)));
-            }
-            window.scrollTo(0, y);
-        }""",
-        level,
-    )
     page.wait_for_timeout(2000)
 
 
@@ -382,16 +356,21 @@ def collect_candidates(
 ) -> list[Candidate]:
     found: dict[str, Candidate] = {}
     stagnant_rounds = 0
-    last_height = 0
     last_found = 0
-    unstick_level = 0
-    max_unstick_level = 3
 
     for round_no in range(max_scrolls + 1):
         cards = page.locator(CARD_SELECTOR)
         for index in range(cards.count()):
+            card = cards.nth(index)
             try:
-                candidate = card_candidate(cards.nth(index))
+                # 先用链接快速跳过已收录候选，减少每轮完整解析开销。
+                hrefs = card.locator("a[href]").evaluate_all(
+                    "els => els.map(e => e.href)"
+                )
+                known_uid = extract_uid("", hrefs)
+                if known_uid and known_uid in found:
+                    continue
+                candidate = card_candidate(card)
                 if candidate:
                     found[candidate.uid] = candidate
                     if stop_after is not None and len(found) >= stop_after:
@@ -403,31 +382,17 @@ def collect_candidates(
         if round_no == max_scrolls:
             break
 
-        height = page.evaluate(
-            "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
-        )
-        no_progress = height == last_height and len(found) == last_found
-        if no_progress:
-            if unstick_level < max_unstick_level:
-                unstick_level += 1
-                print(
-                    f"列表未增长，第 {unstick_level}/{max_unstick_level} 次"
-                    "离开底部以解除加载卡住……"
-                )
-                unstick_fan_list(page, unstick_level)
-                scroll_once(page)
-                continue
-            # 三档解锁都无效，才记为一次真正的停滞。
+        # 虚拟列表高度会抖动，不能用高度判断到底；只看候选数是否增长。
+        if len(found) == last_found:
             stagnant_rounds += 1
-            unstick_level = 0
         else:
             stagnant_rounds = 0
-            unstick_level = 0
-
-        if stagnant_rounds >= 3:
-            break
-        last_height = height
         last_found = len(found)
+        if stagnant_rounds >= 3:
+            print(f"连续 {stagnant_rounds} 轮候选未增加，结束扫描。")
+            break
+
+        # 每轮扫描后：快速上滑半屏，再继续下滑加载。
         scroll_once(page)
     return list(found.values())
 
