@@ -399,22 +399,31 @@ def write_candidates(candidates: list[Candidate]) -> None:
         writer.writerows(asdict(item) for item in candidates)
 
 
-def load_candidate_uids() -> set[str]:
+def load_candidates() -> list[Candidate]:
     if not CANDIDATES_JSON.exists():
-        raise RuntimeError("找不到候选清单，请先运行 python main.py scan")
+        return []
     data = json.loads(CANDIDATES_JSON.read_text(encoding="utf-8"))
-    return {str(item["uid"]) for item in data.get("candidates", [])}
+    candidates: list[Candidate] = []
+    for item in data.get("candidates", []):
+        try:
+            candidates.append(
+                Candidate(
+                    uid=str(item["uid"]),
+                    name=str(item.get("name") or item["uid"]),
+                    source=str(item.get("source") or "兴趣推荐"),
+                    relation=str(item.get("relation") or "未回关"),
+                    profile_url=str(item.get("profile_url") or ""),
+                )
+            )
+        except (KeyError, TypeError):
+            continue
+    return candidates
 
 
-def load_whitelist(path: Path) -> set[str]:
-    if not path.exists():
-        return set()
-    values: set[str] = set()
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        value = line.strip().split(",", 1)[0].strip()
-        if value and not value.startswith("#") and value.lower() != "uid":
-            values.add(value)
-    return values
+def drop_candidate(candidates: list[Candidate], uid: str) -> None:
+    """从内存名单和磁盘名单中移除已成功处理的候选。"""
+    candidates[:] = [item for item in candidates if item.uid != uid]
+    write_candidates(candidates)
 
 
 def append_action(candidate: Candidate, status: str, detail: str = "") -> None:
@@ -458,27 +467,28 @@ def remove_card(page: Page, card: Locator) -> None:
 def clean_candidates(
     page: Page,
     candidates: list[Candidate],
-    whitelist: set[str],
     min_delay: float,
     max_delay: float,
     removed_before: int = 0,
     target_total: int | None = None,
 ) -> tuple[int, int]:
-    """只处理启动时锁定的候选；仅为定位这些候选做有限滚动。"""
+    """处理锁定的候选名单；成功移除后立即从名单落盘删除，便于失败后直接续跑。"""
     removed = 0
     checked = 0
+    locked_count = len(candidates)
     # 扫描候选时页面可能停在下方；先回到顶部，确保第一个候选重新进入 DOM。
     page.evaluate("window.scrollTo(0, 0)")
     page.wait_for_timeout(1200)
 
-    for expected in candidates:
-        if expected.uid in whitelist:
-            continue
+    # 用副本遍历，以便成功后安全改写 candidates。
+    for expected in list(candidates):
+        if target_total is not None and removed_before + removed >= target_total:
+            break
         matched_card = None
         # 每个候选都从顶部逐屏向下定位。上限与本批人数相关，绝不无限滚动。
         page.evaluate("window.scrollTo(0, 0)")
         page.wait_for_timeout(500)
-        max_search_steps = max(12, len(candidates) * 3)
+        max_search_steps = max(12, locked_count * 3)
         for attempt in range(max_search_steps + 1):
             cards = page.locator(CARD_SELECTOR)
             for index in range(cards.count()):
@@ -499,22 +509,32 @@ def clean_candidates(
         if matched_card is None:
             print(
                 f"停止：从顶部逐屏查找 {max_search_steps} 次后仍找不到锁定候选 "
-                f"{expected.name}。"
+                f"{expected.name}。剩余 {len(candidates)} 个将保留在候选名单中。"
             )
             break
         try:
             remove_card(page, matched_card)
+            drop_candidate(candidates, expected.uid)
             removed += 1
             append_action(expected, "removed")
             done = removed_before + removed
             if target_total is None:
-                print(f"[{done}] 已移除：{expected.name}")
+                print(
+                    f"[{done}] 已移除：{expected.name}；名单剩余 {len(candidates)} 个"
+                )
             else:
-                print(f"[{done}/{target_total}] 已移除：{expected.name}")
+                print(
+                    f"[{done}/{target_total}] 已移除：{expected.name}；"
+                    f"名单剩余 {len(candidates)} 个"
+                )
             page.wait_for_timeout(int(random.uniform(min_delay, max_delay) * 1000))
         except Exception as exc:
             append_action(expected, "failed", str(exc))
-            print(f"停止：移除 {expected.uid} 失败：{exc}", file=sys.stderr)
+            print(
+                f"停止：移除 {expected.uid} 失败：{exc}；"
+                f"剩余 {len(candidates)} 个将保留在候选名单中。",
+                file=sys.stderr,
+            )
             break
     return removed, checked
 
@@ -541,7 +561,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="本批最多移除数量；不加则扫描并移除所有匹配候选",
     )
     clean.add_argument("--max-scrolls", type=int, default=500)
-    clean.add_argument("--whitelist", type=Path, default=Path("whitelist.txt"))
     clean.add_argument("--min-delay", type=float, default=2.0)
     clean.add_argument("--max-delay", type=float, default=6.0)
     clean.add_argument(
@@ -587,69 +606,71 @@ def run(args: argparse.Namespace) -> None:
                 print(f"请先检查 {CANDIDATES_CSV}，确认后再运行 clean。")
                 return
 
-            whitelist = load_whitelist(args.whitelist)
             unlimited = args.limit is None
             total_removed = 0
             total_checked = 0
             consecutive_no_progress = 0
             round_no = 0
 
-            while unlimited or total_removed < args.limit:
+            # 首轮扫描锁定名单；之后失败重试只处理剩余候选，不再重新扫描。
+            remaining_quota = None if unlimited else args.limit
+            pending = collect_candidates(
+                page, args.max_scrolls, stop_after=remaining_quota
+            )
+            write_candidates(pending)
+            if not pending:
+                print("没有找到可处理的匹配候选。")
+            else:
+                print(f"已锁定候选 {len(pending)} 个。")
+
+            while pending and (unlimited or total_removed < args.limit):
                 round_no += 1
-                remaining = None if unlimited else args.limit - total_removed
                 if round_no > 1:
-                    remaining_text = "全部匹配候选" if unlimited else f"{remaining} 个"
                     print(
-                        f"\n第 {round_no - 1} 轮未完成，重新进入粉丝页并扫描；"
-                        f"还需移除 {remaining_text}……"
+                        f"\n第 {round_no - 1} 轮未完成，重新进入粉丝页；"
+                        f"继续处理剩余 {len(pending)} 个候选（不重新扫描）……"
                     )
                     fans_url = navigate_to_sorted_fans(page)
                     print(f"已重新进入粉丝页：{fans_url}")
                     wait_for_cards(page)
 
-                # 有 --limit 时只扫描剩余数量；不加则全量扫描匹配候选。
-                batch = collect_candidates(page, args.max_scrolls, stop_after=remaining)
-                if not batch:
-                    consecutive_no_progress += 1
-                    print("本轮没有找到匹配候选，将重新扫描。")
-                else:
-                    if remaining is not None and len(batch) < remaining:
-                        print(f"本轮只找到 {len(batch)} 个匹配候选，将按实际数量处理。")
-                    write_candidates(batch)
-                    print(f"第 {round_no} 轮候选明细：")
-                    for index, candidate in enumerate(batch, start=1):
-                        print(
-                            f"  {index}. 微博名字={candidate.name} | "
-                            f"来源={candidate.source} | 已回关=否"
-                        )
-                    goal_text = "全部匹配" if unlimited else str(args.limit)
+                print(f"第 {round_no} 轮候选明细（共 {len(pending)} 个）：")
+                for index, candidate in enumerate(pending, start=1):
                     print(
-                        f"候选 {len(batch)} 个，白名单 {len(whitelist)} 个，"
-                        f"总目标 {goal_text} 个，已完成 {total_removed} 个。"
+                        f"  {index}. 微博名字={candidate.name} | "
+                        f"来源={candidate.source} | 已回关=否"
                     )
-                    removed, checked = clean_candidates(
-                        page,
-                        batch,
-                        whitelist,
-                        args.min_delay,
-                        args.max_delay,
-                        removed_before=total_removed,
-                        target_total=None if unlimited else args.limit,
-                    )
-                    total_removed += removed
-                    total_checked += checked
-                    consecutive_no_progress = (
-                        consecutive_no_progress + 1 if removed == 0 else 0
-                    )
+                goal_text = "全部匹配" if unlimited else str(args.limit)
+                print(
+                    f"候选 {len(pending)} 个，总目标 {goal_text} 个，"
+                    f"已完成 {total_removed} 个。"
+                )
+                removed, checked = clean_candidates(
+                    page,
+                    pending,
+                    args.min_delay,
+                    args.max_delay,
+                    removed_before=total_removed,
+                    target_total=None if unlimited else args.limit,
+                )
+                total_removed += removed
+                total_checked += checked
+                consecutive_no_progress = (
+                    consecutive_no_progress + 1 if removed == 0 else 0
+                )
 
                 if consecutive_no_progress >= 3:
-                    print("连续 3 轮没有成功移除，停止任务，避免无限重试。")
+                    print(
+                        "连续 3 轮没有成功移除，停止任务，避免无限重试；"
+                        f"剩余 {len(pending)} 个仍保留在 {CANDIDATES_JSON}。"
+                    )
                     break
 
             goal_summary = "全部匹配" if unlimited else str(args.limit)
             print(
                 f"任务完成：移除 {total_removed}/{goal_summary} 个，"
-                f"检查 {total_checked} 个候选；日志：{ACTION_LOG}"
+                f"检查 {total_checked} 个候选；名单剩余 {len(pending)} 个；"
+                f"日志：{ACTION_LOG}"
             )
         finally:
             try:
