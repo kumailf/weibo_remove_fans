@@ -1,6 +1,7 @@
 import unittest
+from argparse import Namespace
 
-from main import extract_uid, normalize_fans_url
+from main import extract_uid, normalize_fans_url, validate_args
 
 
 class NormalizeFansUrlTests(unittest.TestCase):
@@ -33,6 +34,31 @@ class ExtractUidTests(unittest.TestCase):
         self.assertEqual(extract_uid("用户4009663657\n暂无简介", []), "4009663657")
 
 
+class ValidateArgsTests(unittest.TestCase):
+    def test_clean_allows_missing_limit(self):
+        validate_args(
+            Namespace(
+                command="clean",
+                confirm=True,
+                limit=None,
+                min_delay=2.0,
+                max_delay=6.0,
+                max_scrolls=500,
+            )
+        )
+
+    def test_clean_rejects_non_positive_limit(self):
+        with self.assertRaises(ValueError):
+            validate_args(
+                Namespace(
+                    command="clean",
+                    confirm=True,
+                    limit=0,
+                    min_delay=2.0,
+                    max_delay=6.0,
+                    max_scrolls=500,
+                )
+            )
 
 
 if __name__ == "__main__":

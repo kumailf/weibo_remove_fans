@@ -1,0 +1,13 @@
+---
+description: Commit 后必须自动推送到远程
+alwaysApply: true
+---
+
+# 自动推送
+
+本仓库约定：只要有 commit，就立刻推到 `origin` 当前分支。
+
+- 用户要求提交改动时：commit 成功后必须立刻 `git push -u origin HEAD`（或等价命令）
+- 不要只提交不推送；用户已要求后续所有改动自动推远程
+- 禁止 `Co-authored-by`
+- 不要用 `--force` 推送 main/master，除非用户明确要求

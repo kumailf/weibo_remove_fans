@@ -293,6 +293,12 @@ def scroll_once(page: Page) -> None:
     page.wait_for_timeout(9000)
 
 
+def scroll_nudge_up(page: Page) -> None:
+    """微博列表偶发“加载中”卡住时，向上轻滑一次通常能解除。"""
+    page.evaluate("window.scrollBy(0, -Math.max(300, window.innerHeight * 0.5))")
+    page.wait_for_timeout(1500)
+
+
 def scroll_one_screen(page: Page) -> None:
     """逐屏向下定位虚拟列表中的已锁定候选，避免直接跳过中间卡片。"""
     page.evaluate("window.scrollBy(0, Math.max(400, window.innerHeight * 0.8))")
@@ -305,6 +311,8 @@ def collect_candidates(
     found: dict[str, Candidate] = {}
     stagnant_rounds = 0
     last_height = 0
+    last_found = 0
+    pending_nudge = False
 
     for round_no in range(max_scrolls + 1):
         cards = page.locator(CARD_SELECTOR)
@@ -321,11 +329,27 @@ def collect_candidates(
         print(f"扫描轮次 {round_no + 1}：已发现 {len(found)} 个候选")
         if round_no == max_scrolls:
             break
+
         height = page.evaluate("document.body.scrollHeight")
-        stagnant_rounds = stagnant_rounds + 1 if height == last_height else 0
+        no_progress = height == last_height and len(found) == last_found
+        if no_progress:
+            if not pending_nudge:
+                # 高度与候选都未增长时，先向上滑一次再继续下拉，避免加载卡住误判到底。
+                print("列表未增长，尝试向上滑动以解除加载卡住……")
+                scroll_nudge_up(page)
+                pending_nudge = True
+                scroll_once(page)
+                continue
+            stagnant_rounds += 1
+            pending_nudge = False
+        else:
+            stagnant_rounds = 0
+            pending_nudge = False
+
         if stagnant_rounds >= 3:
             break
         last_height = height
+        last_found = len(found)
         scroll_once(page)
     return list(found.values())
 
@@ -454,8 +478,11 @@ def clean_candidates(
             remove_card(page, matched_card)
             removed += 1
             append_action(expected, "removed")
-            total = target_total or len(candidates)
-            print(f"[{removed_before + removed}/{total}] 已移除：{expected.name}")
+            done = removed_before + removed
+            if target_total is None:
+                print(f"[{done}] 已移除：{expected.name}")
+            else:
+                print(f"[{done}/{target_total}] 已移除：{expected.name}")
             page.wait_for_timeout(int(random.uniform(min_delay, max_delay) * 1000))
         except Exception as exc:
             append_action(expected, "failed", str(exc))
@@ -479,7 +506,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     clean = subparsers.add_parser("clean", help="按候选清单分批移除粉丝")
     add_common_arguments(clean)
-    clean.add_argument("--limit", type=int, default=10, help="本批最多移除数量（默认 10）")
+    clean.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="本批最多移除数量；不加则扫描并移除所有匹配候选",
+    )
     clean.add_argument("--max-scrolls", type=int, default=500)
     clean.add_argument("--whitelist", type=Path, default=Path("whitelist.txt"))
     clean.add_argument("--min-delay", type=float, default=2.0)
@@ -498,7 +530,7 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.command == "clean":
         if not args.confirm:
             raise ValueError("clean 是破坏性操作，确认候选清单后请加 --confirm")
-        if args.limit <= 0:
+        if args.limit is not None and args.limit <= 0:
             raise ValueError("--limit 必须大于 0")
         if args.min_delay < 0 or args.max_delay < args.min_delay:
             raise ValueError("延迟参数无效，应满足 0 <= min-delay <= max-delay")
@@ -528,30 +560,32 @@ def run(args: argparse.Namespace) -> None:
                 return
 
             whitelist = load_whitelist(args.whitelist)
+            unlimited = args.limit is None
             total_removed = 0
             total_checked = 0
             consecutive_no_progress = 0
             round_no = 0
 
-            while total_removed < args.limit:
+            while unlimited or total_removed < args.limit:
                 round_no += 1
-                remaining = args.limit - total_removed
+                remaining = None if unlimited else args.limit - total_removed
                 if round_no > 1:
+                    remaining_text = "全部匹配候选" if unlimited else f"{remaining} 个"
                     print(
                         f"\n第 {round_no - 1} 轮未完成，重新进入粉丝页并扫描；"
-                        f"还需移除 {remaining} 个……"
+                        f"还需移除 {remaining_text}……"
                     )
                     fans_url = navigate_to_sorted_fans(page)
                     print(f"已重新进入粉丝页：{fans_url}")
                     wait_for_cards(page)
 
-                # 每轮只扫描本次剩余数量，不做全量扫描。
+                # 有 --limit 时只扫描剩余数量；不加则全量扫描匹配候选。
                 batch = collect_candidates(page, args.max_scrolls, stop_after=remaining)
                 if not batch:
                     consecutive_no_progress += 1
                     print("本轮没有找到匹配候选，将重新扫描。")
                 else:
-                    if len(batch) < remaining:
+                    if remaining is not None and len(batch) < remaining:
                         print(f"本轮只找到 {len(batch)} 个匹配候选，将按实际数量处理。")
                     write_candidates(batch)
                     print(f"第 {round_no} 轮候选明细：")
@@ -560,9 +594,10 @@ def run(args: argparse.Namespace) -> None:
                             f"  {index}. 微博名字={candidate.name} | "
                             f"来源={candidate.source} | 已回关=否"
                         )
+                    goal_text = "全部匹配" if unlimited else str(args.limit)
                     print(
                         f"候选 {len(batch)} 个，白名单 {len(whitelist)} 个，"
-                        f"总目标 {args.limit} 个，已完成 {total_removed} 个。"
+                        f"总目标 {goal_text} 个，已完成 {total_removed} 个。"
                     )
                     removed, checked = clean_candidates(
                         page,
@@ -571,7 +606,7 @@ def run(args: argparse.Namespace) -> None:
                         args.min_delay,
                         args.max_delay,
                         removed_before=total_removed,
-                        target_total=args.limit,
+                        target_total=None if unlimited else args.limit,
                     )
                     total_removed += removed
                     total_checked += checked
@@ -583,8 +618,9 @@ def run(args: argparse.Namespace) -> None:
                     print("连续 3 轮没有成功移除，停止任务，避免无限重试。")
                     break
 
+            goal_summary = "全部匹配" if unlimited else str(args.limit)
             print(
-                f"任务完成：移除 {total_removed}/{args.limit} 个，"
+                f"任务完成：移除 {total_removed}/{goal_summary} 个，"
                 f"检查 {total_checked} 个候选；日志：{ACTION_LOG}"
             )
         finally:

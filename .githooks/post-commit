@@ -1,0 +1,4 @@
+#!/bin/sh
+# Auto-push after every successful commit on this repo.
+branch=$(git symbolic-ref --quiet --short HEAD) || exit 0
+git push -u origin "HEAD:${branch}"
