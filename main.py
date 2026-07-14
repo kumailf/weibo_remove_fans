@@ -336,8 +336,16 @@ def visible_card_indices_top_to_bottom(page: Page) -> list[int]:
 def harvest_visible_uids(page: Page) -> set[str]:
     """收集当前视口卡片中的 UID（用于预加载进度，不区分是否匹配规则）。"""
     hrefs: list[str] = page.evaluate(
-        f"""() => Array.from(document.querySelectorAll({CARD_SELECTOR!r} + ' a[href]'))
-            .map((a) => a.href || '')"""
+        f"""() => {{
+            const cards = Array.from(document.querySelectorAll({CARD_SELECTOR!r}));
+            const hrefs = [];
+            for (const card of cards) {{
+                for (const a of card.querySelectorAll('a[href]')) {{
+                    hrefs.push(a.href || '');
+                }}
+            }}
+            return hrefs;
+        }}"""
     )
     uids: set[str] = set()
     for href in hrefs:
