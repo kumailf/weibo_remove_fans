@@ -1,7 +1,18 @@
+import tempfile
 import unittest
 from argparse import Namespace
+from pathlib import Path
+from unittest.mock import patch
 
-from main import extract_uid, normalize_fans_url, validate_args
+from main import (
+    Candidate,
+    drop_candidate,
+    extract_uid,
+    load_candidates,
+    normalize_fans_url,
+    validate_args,
+    write_candidates,
+)
 
 
 class NormalizeFansUrlTests(unittest.TestCase):
@@ -59,6 +70,28 @@ class ValidateArgsTests(unittest.TestCase):
                     max_scrolls=500,
                 )
             )
+
+
+class CandidateListTests(unittest.TestCase):
+    def test_drop_candidate_updates_memory_and_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            json_path = data_dir / "candidates.json"
+            csv_path = data_dir / "candidates.csv"
+            pending = [
+                Candidate("1", "a", "兴趣推荐", "未回关", ""),
+                Candidate("2", "b", "兴趣推荐", "未回关", ""),
+            ]
+            with patch.multiple(
+                "main",
+                DATA_DIR=data_dir,
+                CANDIDATES_JSON=json_path,
+                CANDIDATES_CSV=csv_path,
+            ):
+                write_candidates(pending)
+                drop_candidate(pending, "1")
+                self.assertEqual([item.uid for item in pending], ["2"])
+                self.assertEqual([item.uid for item in load_candidates()], ["2"])
 
 
 if __name__ == "__main__":
