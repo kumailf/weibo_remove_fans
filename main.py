@@ -322,36 +322,34 @@ def scroll_one_screen(page: Page) -> None:
 
 def visible_card_indices_top_to_bottom(page: Page) -> list[int]:
     """按屏幕纵向位置从上到下返回当前卡片索引（贴合关注时间倒序）。"""
-    return page.evaluate(
-        f"""() => {{
-            const cards = Array.from(document.querySelectorAll({CARD_SELECTOR!r}));
-            return cards
-                .map((el, index) => ({{ index, y: el.getBoundingClientRect().top }}))
-                .sort((a, b) => a.y - b.y)
-                .map((item) => item.index);
-        }}"""
-    )
+    cards = page.locator(CARD_SELECTOR)
+    indexed: list[tuple[float, int]] = []
+    for index in range(cards.count()):
+        try:
+            top = float(
+                cards.nth(index).evaluate("el => el.getBoundingClientRect().top")
+            )
+        except Exception:
+            top = float("inf")
+        indexed.append((top, index))
+    indexed.sort(key=lambda item: item[0])
+    return [index for _, index in indexed]
 
 
 def harvest_visible_uids(page: Page) -> set[str]:
     """收集当前视口卡片中的 UID（用于预加载进度，不区分是否匹配规则）。"""
-    hrefs: list[str] = page.evaluate(
-        f"""() => {{
-            const cards = Array.from(document.querySelectorAll({CARD_SELECTOR!r}));
-            const hrefs = [];
-            for (const card of cards) {{
-                for (const a of card.querySelectorAll('a[href]')) {{
-                    hrefs.push(a.href || '');
-                }}
-            }}
-            return hrefs;
-        }}"""
-    )
     uids: set[str] = set()
-    for href in hrefs:
-        uid = extract_uid("", [href])
-        if uid:
-            uids.add(uid)
+    cards = page.locator(CARD_SELECTOR)
+    for index in range(cards.count()):
+        try:
+            hrefs = cards.nth(index).locator("a[href]").evaluate_all(
+                "els => els.map(e => e.href)"
+            )
+            uid = extract_uid("", hrefs)
+            if uid:
+                uids.add(uid)
+        except Exception:
+            continue
     return uids
 
 
