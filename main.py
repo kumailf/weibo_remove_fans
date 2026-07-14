@@ -399,28 +399,37 @@ def clean_candidates(
     min_delay: float,
     max_delay: float,
 ) -> tuple[int, int]:
-    """只处理启动时锁定的候选，不滚动补数。"""
+    """只处理启动时锁定的候选；仅为定位这些候选做有限滚动。"""
     removed = 0
     checked = 0
+    # 扫描候选时页面可能停在下方；先回到顶部，确保第一个候选重新进入 DOM。
+    page.evaluate("window.scrollTo(0, 0)")
+    page.wait_for_timeout(1200)
+
     for expected in candidates:
         if expected.uid in whitelist:
             continue
-        cards = page.locator(CARD_SELECTOR)
         matched_card = None
-        for index in range(cards.count()):
-            card = cards.nth(index)
-            try:
-                candidate = card_candidate(card)
-            except Exception as exc:
-                print(f"警告：跳过无法解析的卡片：{exc}", file=sys.stderr)
-                continue
-            if candidate and candidate.uid == expected.uid:
-                matched_card = card
+        # 虚拟列表只保留可见区域附近的卡片。最多向下查找 5 次，避免无限滚动。
+        for attempt in range(6):
+            cards = page.locator(CARD_SELECTOR)
+            for index in range(cards.count()):
+                card = cards.nth(index)
+                try:
+                    candidate = card_candidate(card)
+                except Exception as exc:
+                    print(f"警告：跳过无法解析的卡片：{exc}", file=sys.stderr)
+                    continue
+                if candidate and candidate.uid == expected.uid:
+                    matched_card = card
+                    break
+            if matched_card is not None or attempt == 5:
                 break
+            scroll_once(page)
 
         checked += 1
         if matched_card is None:
-            print(f"停止：当前页面找不到锁定候选 {expected.name} ({expected.uid})。")
+            print(f"停止：有限滚动后仍找不到锁定候选 {expected.name}。")
             break
         try:
             remove_card(page, matched_card)
