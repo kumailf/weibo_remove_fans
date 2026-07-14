@@ -378,18 +378,22 @@ def append_action(candidate: Candidate, status: str, detail: str = "") -> None:
 
 def remove_card(page: Page, card: Locator) -> None:
     menu = card.locator("span.woo-pop-ctrl:has(i.woo-font--ellipsis)").first
-    menu.scroll_into_view_if_needed()
-    menu.hover()
-    page.wait_for_timeout(500)
-    remove_items = page.get_by_text("移除粉丝", exact=True)
     remove = None
-    for index in range(remove_items.count()):
-        item = remove_items.nth(index)
-        if item.is_visible():
-            remove = item
+    for attempt in range(3):
+        page.keyboard.press("Escape")
+        menu.scroll_into_view_if_needed()
+        menu.hover(force=attempt > 0)
+        page.wait_for_timeout(500 + attempt * 300)
+        remove_items = page.get_by_text("移除粉丝", exact=True)
+        for index in range(remove_items.count()):
+            item = remove_items.nth(index)
+            if item.is_visible():
+                remove = item
+                break
+        if remove is not None:
             break
     if remove is None:
-        raise RuntimeError("悬停后没有出现可见的“移除粉丝”菜单")
+        raise RuntimeError("连续悬停 3 次后仍未出现可见的“移除粉丝”菜单")
     remove.click()
     dialog = page.locator('[role="alertdialog"][aria-modal="true"]:visible')
     confirm = dialog.get_by_role("button", name="确认", exact=True)
