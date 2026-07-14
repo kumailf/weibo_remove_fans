@@ -402,7 +402,11 @@ def card_has_uid(card: Locator, uid: str) -> bool:
 def find_card_for_uid(
     page: Page, uid: str, max_search_steps: int
 ) -> Locator | None:
-    """始终从列表顶部向下找，保证与时间倒序名单顺序一致，避免跳到中间乱找。"""
+    """从列表顶部找下一位候选。
+
+    关注时间倒序下，刚移除后下一位通常仍在顶部附近；
+    先在顶部多等几轮，避免刚移除就下滑半屏再折返回顶。
+    """
 
     def scan_visible() -> Locator | None:
         cards = page.locator(CARD_SELECTOR)
@@ -416,14 +420,21 @@ def find_card_for_uid(
         return None
 
     page.evaluate("window.scrollTo(0, 0)")
-    page.wait_for_timeout(300)
-    for attempt in range(max_search_steps + 1):
+    page.wait_for_timeout(400)
+
+    # 优先钉在顶部等待列表刷新，不先下滑。
+    for _ in range(5):
         matched = scan_visible()
         if matched is not None:
             return matched
-        if attempt == max_search_steps:
-            break
+        page.wait_for_timeout(350)
+        page.evaluate("window.scrollTo(0, 0)")
+
+    for attempt in range(max_search_steps):
         scroll_one_screen(page)
+        matched = scan_visible()
+        if matched is not None:
+            return matched
     return None
 
 
@@ -608,6 +619,8 @@ def clean_candidates(
             drop_candidate(candidates, expected.uid)
             removed += 1
             append_action(expected, "removed")
+            # 移除后钉子顶部：下一位按时间倒序本就应该出现在首屏。
+            page.evaluate("window.scrollTo(0, 0)")
             done = removed_before + removed
             if target_total is None:
                 print(
