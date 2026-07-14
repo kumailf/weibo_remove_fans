@@ -348,19 +348,26 @@ def harvest_visible_uids(page: Page) -> set[str]:
 
 
 def preload_fan_list(page: Page, max_scrolls: int) -> int:
-    """先把粉丝列表下拉加载完，不解析候选规则。"""
+    """先把粉丝列表下拉加载完，不解析候选规则。
+
+    max_scrolls：上滑半屏再下滑的最大次数。
+    """
     seen: set[str] = set()
     stagnant_rounds = 0
     last_count = 0
 
     page.evaluate("window.scrollTo(0, 0)")
     page.wait_for_timeout(400)
+    seen |= harvest_visible_uids(page)
+    print(f"预加载起始：已载入约 {len(seen)} 个粉丝")
+    last_count = len(seen)
 
-    for round_no in range(max_scrolls + 1):
+    for scroll_no in range(max_scrolls):
+        scroll_once(page)
         seen |= harvest_visible_uids(page)
-        print(f"预加载轮次 {round_no + 1}：已载入约 {len(seen)} 个粉丝")
-        if round_no == max_scrolls:
-            break
+        print(
+            f"预加载 {scroll_no + 1}/{max_scrolls}：已载入约 {len(seen)} 个粉丝"
+        )
         if len(seen) == last_count:
             stagnant_rounds += 1
         else:
@@ -369,7 +376,10 @@ def preload_fan_list(page: Page, max_scrolls: int) -> int:
         if stagnant_rounds >= 3:
             print(f"连续 {stagnant_rounds} 轮粉丝数未增加，预加载结束。")
             break
-        scroll_once(page)
+    else:
+        print(
+            f"已达到预加载上限 {max_scrolls} 次（上滑半屏再下滑算 1 次），停止加载。"
+        )
     return len(seen)
 
 
@@ -466,7 +476,9 @@ def collect_candidates(
     loaded = preload_fan_list(page, max_scrolls)
     print(f"预加载完成，约 {loaded} 个粉丝卡片已载入。")
     print("阶段 2/2：回到顶部，按关注时间倒序扫描候选……")
-    return scan_candidates_from_top(page, max_scrolls, stop_after=stop_after)
+    # 回顶逐屏扫描需要更多步，才能覆盖「跳到底部」预加载出来的列表长度。
+    scan_steps = max(max_scrolls * 8, 200)
+    return scan_candidates_from_top(page, scan_steps, stop_after=stop_after)
 
 
 def write_candidates(candidates: list[Candidate]) -> None:
@@ -623,7 +635,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     scan = subparsers.add_parser("scan", help="只读扫描，生成 JSON/CSV 候选清单")
     add_common_arguments(scan)
-    scan.add_argument("--max-scrolls", type=int, default=500, help="最大滚动次数（默认 500）")
+    scan.add_argument(
+        "--max-scrolls",
+        type=int,
+        default=100,
+        help="预加载最大次数：上滑半屏再下滑算 1 次（默认 100）",
+    )
 
     clean = subparsers.add_parser("clean", help="按候选清单分批移除粉丝")
     add_common_arguments(clean)
@@ -633,7 +650,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="本批最多移除数量；不加则扫描并移除所有匹配候选",
     )
-    clean.add_argument("--max-scrolls", type=int, default=500)
+    clean.add_argument(
+        "--max-scrolls",
+        type=int,
+        default=100,
+        help="预加载最大次数：上滑半屏再下滑算 1 次（默认 100）",
+    )
     clean.add_argument(
         "--min-delay",
         type=float,

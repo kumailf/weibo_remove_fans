@@ -54,7 +54,7 @@ class ValidateArgsTests(unittest.TestCase):
                 limit=None,
                 min_delay=2.0,
                 max_delay=6.0,
-                max_scrolls=500,
+                max_scrolls=100,
             )
         )
 
@@ -67,7 +67,7 @@ class ValidateArgsTests(unittest.TestCase):
                     limit=0,
                     min_delay=2.0,
                     max_delay=6.0,
-                    max_scrolls=500,
+                    max_scrolls=100,
                 )
             )
 
