@@ -307,11 +307,31 @@ def card_candidate(card: Locator) -> Candidate | None:
 
 
 def scroll_once(page: Page) -> None:
-    """预加载：快速上滑半屏，再继续下滑加载更多。"""
-    page.evaluate("window.scrollBy(0, -Math.floor(window.innerHeight * 0.5))")
-    page.wait_for_timeout(120)
-    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    """预加载：先落底加载，再明确上滑半屏，避免卡在底部哨兵。"""
+    page.evaluate(
+        """() => {
+            const h = Math.max(
+                document.body.scrollHeight,
+                document.documentElement.scrollHeight
+            );
+            window.scrollTo(0, h);
+        }"""
+    )
     page.wait_for_timeout(2000)
+    # 上滑半屏：用多重高度兜底，避免 no_viewport 下 innerHeight 过小导致几乎不动。
+    page.evaluate(
+        """() => {
+            const vh = Math.max(
+                window.innerHeight || 0,
+                document.documentElement.clientHeight || 0,
+                window.screen?.availHeight ? Math.floor(window.screen.availHeight * 0.7) : 0,
+                700
+            );
+            const delta = Math.max(Math.floor(vh * 0.5), 400);
+            window.scrollBy(0, -delta);
+        }"""
+    )
+    page.wait_for_timeout(200)
 
 
 def scroll_one_screen(page: Page) -> None:
