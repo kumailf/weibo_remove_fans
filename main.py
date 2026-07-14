@@ -400,12 +400,12 @@ def card_has_uid(card: Locator, uid: str) -> bool:
 
 
 def find_card_for_uid(
-    page: Page, uid: str, max_search_steps: int
+    page: Page, uid: str, max_search_steps: int, *, from_top: bool = False
 ) -> Locator | None:
-    """从列表顶部找下一位候选。
+    """定位指定候选。
 
-    关注时间倒序下，刚移除后下一位通常仍在顶部附近；
-    先在顶部多等几轮，避免刚移除就下滑半屏再折返回顶。
+    默认不回顶：前几页经常是无需移除的正常粉丝，移除后应在当前位置等待刷新，
+    再继续往下找下一位；只有整轮开始时才从顶部对齐。
     """
 
     def scan_visible() -> Locator | None:
@@ -419,18 +419,18 @@ def find_card_for_uid(
                 continue
         return None
 
-    page.evaluate("window.scrollTo(0, 0)")
-    page.wait_for_timeout(400)
+    if from_top:
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(400)
 
-    # 优先钉在顶部等待列表刷新，不先下滑。
+    # 先在当前位置等列表刷新（移除后卡片会上移），不要先回顶。
     for _ in range(5):
         matched = scan_visible()
         if matched is not None:
             return matched
         page.wait_for_timeout(350)
-        page.evaluate("window.scrollTo(0, 0)")
 
-    for attempt in range(max_search_steps):
+    for _ in range(max_search_steps):
         scroll_one_screen(page)
         matched = scan_visible()
         if matched is not None:
@@ -595,17 +595,24 @@ def clean_candidates(
     removed_before: int = 0,
     target_total: int | None = None,
 ) -> tuple[int, int]:
-    """按名单顺序移除；每次都从顶部向下定位，保持与关注时间倒序一致。"""
+    """按名单顺序移除；在当前位置等待刷新后继续找下一位，不反复回顶。"""
     removed = 0
     checked = 0
     locked_count = len(candidates)
+    # 整轮开始时回顶一次；之后顺着往下走，跳过中间的正常粉丝。
+    page.evaluate("window.scrollTo(0, 0)")
+    page.wait_for_timeout(400)
 
-    for expected in list(candidates):
+    for index, expected in enumerate(list(candidates)):
         if target_total is not None and removed_before + removed >= target_total:
             break
-        # 名单下一位对应列表更靠上/靠前的位置；移除后也从顶部重新对齐，避免跳到中间。
         max_search_steps = max(8, min(40, locked_count * 2))
-        matched_card = find_card_for_uid(page, expected.uid, max_search_steps)
+        matched_card = find_card_for_uid(
+            page,
+            expected.uid,
+            max_search_steps,
+            from_top=(index == 0),
+        )
 
         checked += 1
         if matched_card is None:
@@ -619,8 +626,6 @@ def clean_candidates(
             drop_candidate(candidates, expected.uid)
             removed += 1
             append_action(expected, "removed")
-            # 移除后钉子顶部：下一位按时间倒序本就应该出现在首屏。
-            page.evaluate("window.scrollTo(0, 0)")
             done = removed_before + removed
             if target_total is None:
                 print(
