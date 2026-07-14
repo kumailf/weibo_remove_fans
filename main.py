@@ -324,7 +324,57 @@ def unstick_fan_list(page: Page, level: int) -> None:
 def scroll_one_screen(page: Page) -> None:
     """逐屏向下定位虚拟列表中的已锁定候选，避免直接跳过中间卡片。"""
     page.evaluate("window.scrollBy(0, Math.max(400, window.innerHeight * 0.8))")
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(250)
+
+
+def card_has_uid(card: Locator, uid: str) -> bool:
+    """快速判断卡片是否对应该 UID，避免每次都做完整文案解析。"""
+    return (
+        card.locator(
+            f'a[href*="/u/{uid}"], a[href*="/profile/{uid}"]'
+        ).count()
+        > 0
+    )
+
+
+def find_card_for_uid(
+    page: Page, uid: str, max_search_steps: int
+) -> Locator | None:
+    """优先在当前视口找卡；找不到再向下翻。勿每轮回顶，否则取关会极慢。"""
+
+    def scan_visible() -> Locator | None:
+        cards = page.locator(CARD_SELECTOR)
+        for index in range(cards.count()):
+            card = cards.nth(index)
+            try:
+                if card_has_uid(card, uid):
+                    return card
+            except Exception:
+                continue
+        return None
+
+    matched = scan_visible()
+    if matched is not None:
+        return matched
+
+    for _ in range(max_search_steps):
+        scroll_one_screen(page)
+        matched = scan_visible()
+        if matched is not None:
+            return matched
+
+    # 当前位置找不到时再从顶部扫一遍，覆盖列表回弹或错位。
+    page.evaluate("window.scrollTo(0, 0)")
+    page.wait_for_timeout(300)
+    matched = scan_visible()
+    if matched is not None:
+        return matched
+    for _ in range(max_search_steps):
+        scroll_one_screen(page)
+        matched = scan_visible()
+        if matched is not None:
+            return matched
+    return None
 
 
 def collect_candidates(
@@ -445,10 +495,14 @@ def remove_card(page: Page, card: Locator) -> None:
         page.keyboard.press("Escape")
         menu.scroll_into_view_if_needed()
         menu.hover(force=attempt > 0)
-        page.wait_for_timeout(500 + attempt * 300)
-        remove_items = page.get_by_text("移除粉丝", exact=True)
-        for index in range(remove_items.count()):
-            item = remove_items.nth(index)
+        candidate = page.get_by_text("移除粉丝", exact=True)
+        try:
+            # 出现菜单即点，不再固定干等 500ms+。
+            candidate.first.wait_for(state="visible", timeout=700 + attempt * 400)
+        except TimeoutError:
+            continue
+        for index in range(candidate.count()):
+            item = candidate.nth(index)
             if item.is_visible():
                 remove = item
                 break
@@ -459,9 +513,12 @@ def remove_card(page: Page, card: Locator) -> None:
     remove.click()
     dialog = page.locator('[role="alertdialog"][aria-modal="true"]:visible')
     confirm = dialog.get_by_role("button", name="确认", exact=True)
-    confirm.wait_for(state="visible", timeout=5000)
+    confirm.wait_for(state="visible", timeout=3000)
     confirm.click()
-    page.wait_for_timeout(500)
+    try:
+        dialog.wait_for(state="hidden", timeout=2000)
+    except TimeoutError:
+        page.wait_for_timeout(150)
 
 
 def clean_candidates(
@@ -476,40 +533,21 @@ def clean_candidates(
     removed = 0
     checked = 0
     locked_count = len(candidates)
-    # 扫描候选时页面可能停在下方；先回到顶部，确保第一个候选重新进入 DOM。
+    # 先回顶一次；之后按列表顺序就地继续找，避免每人都从顶部翻起。
     page.evaluate("window.scrollTo(0, 0)")
-    page.wait_for_timeout(1200)
+    page.wait_for_timeout(400)
 
-    # 用副本遍历，以便成功后安全改写 candidates。
     for expected in list(candidates):
         if target_total is not None and removed_before + removed >= target_total:
             break
-        matched_card = None
-        # 每个候选都从顶部逐屏向下定位。上限与本批人数相关，绝不无限滚动。
-        page.evaluate("window.scrollTo(0, 0)")
-        page.wait_for_timeout(500)
-        max_search_steps = max(12, locked_count * 3)
-        for attempt in range(max_search_steps + 1):
-            cards = page.locator(CARD_SELECTOR)
-            for index in range(cards.count()):
-                card = cards.nth(index)
-                try:
-                    candidate = card_candidate(card)
-                except Exception as exc:
-                    print(f"警告：跳过无法解析的卡片：{exc}", file=sys.stderr)
-                    continue
-                if candidate and candidate.uid == expected.uid:
-                    matched_card = card
-                    break
-            if matched_card is not None or attempt == max_search_steps:
-                break
-            scroll_one_screen(page)
+        max_search_steps = max(8, min(40, locked_count * 2))
+        matched_card = find_card_for_uid(page, expected.uid, max_search_steps)
 
         checked += 1
         if matched_card is None:
             print(
-                f"停止：从顶部逐屏查找 {max_search_steps} 次后仍找不到锁定候选 "
-                f"{expected.name}。剩余 {len(candidates)} 个将保留在候选名单中。"
+                f"停止：查找后仍找不到锁定候选 {expected.name}。"
+                f"剩余 {len(candidates)} 个将保留在候选名单中。"
             )
             break
         try:
@@ -561,8 +599,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="本批最多移除数量；不加则扫描并移除所有匹配候选",
     )
     clean.add_argument("--max-scrolls", type=int, default=500)
-    clean.add_argument("--min-delay", type=float, default=2.0)
-    clean.add_argument("--max-delay", type=float, default=6.0)
+    clean.add_argument(
+        "--min-delay",
+        type=float,
+        default=0.4,
+        help="两次移除之间的最短间隔秒数（默认 0.4）",
+    )
+    clean.add_argument(
+        "--max-delay",
+        type=float,
+        default=1.0,
+        help="两次移除之间的最长间隔秒数（默认 1.0）",
+    )
     clean.add_argument(
         "--confirm",
         action="store_true",
