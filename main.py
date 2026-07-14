@@ -18,6 +18,25 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from playwright.sync_api import BrowserContext, Locator, Page, TimeoutError, sync_playwright
 
 
+def configure_stdio() -> None:
+    """保证中文日志在 Windows / Cursor 终端里正常显示。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+            ctypes.windll.kernel32.SetConsoleCP(65001)
+        except Exception:
+            pass
+
+
 DATA_DIR = Path(".data")
 PROFILE_DIR = DATA_DIR / "weibo-profile"
 SETTINGS_FILE = DATA_DIR / "settings.json"
@@ -694,6 +713,7 @@ def run(args: argparse.Namespace) -> None:
 
 
 def main() -> int:
+    configure_stdio()
     try:
         run(build_parser().parse_args())
         return 0
