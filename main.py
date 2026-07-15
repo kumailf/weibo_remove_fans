@@ -307,31 +307,87 @@ def card_candidate(card: Locator) -> Candidate | None:
 
 
 def scroll_once(page: Page) -> None:
-    """预加载：先落底加载，再明确上滑半屏，避免卡在底部哨兵。"""
+    """预加载：落底加载后，对真实滚动容器上滑半屏。"""
     page.evaluate(
         """() => {
-            const h = Math.max(
-                document.body.scrollHeight,
-                document.documentElement.scrollHeight
+            const collectScrollables = () => {
+                const roots = [
+                    document.scrollingElement,
+                    document.documentElement,
+                    document.body,
+                ].filter(Boolean);
+                for (const el of document.querySelectorAll('div')) {
+                    const style = window.getComputedStyle(el);
+                    const oy = style.overflowY;
+                    if (
+                        (oy === 'auto' || oy === 'scroll' || oy === 'overlay') &&
+                        el.scrollHeight > el.clientHeight + 80
+                    ) {
+                        roots.push(el);
+                    }
+                }
+                return roots;
+            };
+            const roots = collectScrollables();
+            for (const el of roots) {
+                el.scrollTop = el.scrollHeight;
+            }
+            window.scrollTo(
+                0,
+                Math.max(
+                    document.body.scrollHeight,
+                    document.documentElement.scrollHeight
+                )
             );
-            window.scrollTo(0, h);
         }"""
     )
     page.wait_for_timeout(2000)
-    # 上滑半屏：用多重高度兜底，避免 no_viewport 下 innerHeight 过小导致几乎不动。
-    page.evaluate(
+    # 上滑半屏：优先滚列表自身的可滚动容器，窗口高度兜底。
+    moved = page.evaluate(
         """() => {
             const vh = Math.max(
                 window.innerHeight || 0,
                 document.documentElement.clientHeight || 0,
-                window.screen?.availHeight ? Math.floor(window.screen.availHeight * 0.7) : 0,
-                700
+                900
             );
-            const delta = Math.max(Math.floor(vh * 0.5), 400);
-            window.scrollBy(0, -delta);
+            const windowDelta = Math.max(Math.floor(vh * 0.5), 450);
+            let best = null;
+            let bestOverflow = 0;
+            for (const el of document.querySelectorAll('div')) {
+                const style = window.getComputedStyle(el);
+                const oy = style.overflowY;
+                if (!(oy === 'auto' || oy === 'scroll' || oy === 'overlay')) {
+                    continue;
+                }
+                const overflow = el.scrollHeight - el.clientHeight;
+                if (overflow > bestOverflow && el.clientHeight >= 200) {
+                    bestOverflow = overflow;
+                    best = el;
+                }
+            }
+            if (best && best.scrollTop > 0) {
+                const delta = Math.max(Math.floor(best.clientHeight * 0.5), 450);
+                const before = best.scrollTop;
+                best.scrollTop = Math.max(0, before - delta);
+                return {
+                    target: 'container',
+                    delta,
+                    before,
+                    after: best.scrollTop,
+                };
+            }
+            const before = window.scrollY || document.documentElement.scrollTop || 0;
+            window.scrollBy(0, -windowDelta);
+            const after = window.scrollY || document.documentElement.scrollTop || 0;
+            return { target: 'window', delta: windowDelta, before, after };
         }"""
     )
-    page.wait_for_timeout(200)
+    print(
+        f"预加载上滑半屏：目标={moved.get('target')} "
+        f"幅度={moved.get('delta')}px "
+        f"位置 {moved.get('before')}→{moved.get('after')}"
+    )
+    page.wait_for_timeout(250)
 
 
 def scroll_one_screen(page: Page) -> None:
@@ -649,6 +705,8 @@ def clean_candidates(
     max_delay: float,
     removed_before: int = 0,
     target_total: int | None = None,
+    *,
+    skip_initial_top: bool = False,
 ) -> tuple[int, int]:
     """按锁定名单顺序移除。
 
@@ -658,7 +716,8 @@ def clean_candidates(
     removed = 0
     checked = 0
     locked_count = len(candidates)
-    scroll_to_top(page)
+    if not skip_initial_top:
+        scroll_to_top(page)
 
     for index, expected in enumerate(list(candidates)):
         if target_total is not None and removed_before + removed >= target_total:
@@ -669,7 +728,7 @@ def clean_candidates(
             expected.uid,
             expected.name,
             max_search_steps,
-            first_in_round=(index == 0),
+            first_in_round=(index == 0 and not skip_initial_top),
         )
 
         checked += 1
@@ -810,16 +869,17 @@ def run(args: argparse.Namespace) -> None:
                 print("没有找到可处理的匹配候选。")
             else:
                 print(f"已锁定候选 {len(pending)} 个。")
+                print("扫描完成，直接回到顶部开始取关（不再重新进入粉丝页）……")
+                scroll_to_top(page, settle_ms=600)
 
             while pending and (unlimited or total_removed < args.limit):
                 round_no += 1
                 if round_no > 1:
                     print(
-                        f"\n第 {round_no - 1} 轮未完成，重新进入粉丝页；"
-                        f"继续处理剩余 {len(pending)} 个候选（不重新扫描）……"
+                        f"\n第 {round_no - 1} 轮未完成，回到顶部继续处理剩余 "
+                        f"{len(pending)} 个候选（不重新扫描、不重新进页）……"
                     )
-                    fans_url = navigate_to_sorted_fans(page)
-                    print(f"已重新进入粉丝页：{fans_url}")
+                    scroll_to_top(page, settle_ms=600)
                     wait_for_cards(page)
 
                 print(f"第 {round_no} 轮候选明细（共 {len(pending)} 个）：")
@@ -840,6 +900,7 @@ def run(args: argparse.Namespace) -> None:
                     args.max_delay,
                     removed_before=total_removed,
                     target_total=None if unlimited else args.limit,
+                    skip_initial_top=True,
                 )
                 total_removed += removed
                 total_checked += checked
