@@ -342,8 +342,7 @@ def scroll_once(page: Page) -> None:
         }"""
     )
     page.wait_for_timeout(2000)
-    # 上滑半屏：优先滚列表自身的可滚动容器，窗口高度兜底。
-    moved = page.evaluate(
+    page.evaluate(
         """() => {
             const vh = Math.max(
                 window.innerHeight || 0,
@@ -367,25 +366,11 @@ def scroll_once(page: Page) -> None:
             }
             if (best && best.scrollTop > 0) {
                 const delta = Math.max(Math.floor(best.clientHeight * 0.5), 450);
-                const before = best.scrollTop;
-                best.scrollTop = Math.max(0, before - delta);
-                return {
-                    target: 'container',
-                    delta,
-                    before,
-                    after: best.scrollTop,
-                };
+                best.scrollTop = Math.max(0, best.scrollTop - delta);
+                return;
             }
-            const before = window.scrollY || document.documentElement.scrollTop || 0;
             window.scrollBy(0, -windowDelta);
-            const after = window.scrollY || document.documentElement.scrollTop || 0;
-            return { target: 'window', delta: windowDelta, before, after };
         }"""
-    )
-    print(
-        f"预加载上滑半屏：目标={moved.get('target')} "
-        f"幅度={moved.get('delta')}px "
-        f"位置 {moved.get('before')}→{moved.get('after')}"
     )
     page.wait_for_timeout(250)
 
@@ -402,7 +387,7 @@ def scroll_to_top(page: Page, settle_ms: int = 400) -> None:
 
 
 def cards_top_to_bottom(page: Page) -> list[Locator]:
-    """当前视口卡片，按纵向位置从上到下。一次取坐标，避免逐卡 evaluate 卡住。"""
+    """当前视口卡片，按纵向位置从上到下。"""
     cards = page.locator(CARD_SELECTOR)
     count = cards.count()
     if count == 0:
@@ -486,11 +471,10 @@ def search_uid_scrolling_down(
     matched = find_visible_card_by_uid(page, uid)
     if matched is not None:
         return matched
-    for step in range(1, max_steps + 1):
+    for _ in range(1, max_steps + 1):
         scroll_one_screen(page)
         matched = find_visible_card_by_uid(page, uid)
         if matched is not None:
-            print(f"定位 {label}：向下第 {step} 屏找到")
             return matched
     return None
 
@@ -503,39 +487,23 @@ def locate_candidate_card(
     *,
     first_in_round: bool = False,
 ) -> Locator | None:
-    """定位名单中的下一个候选。
-
-    搜索顺序（固定，不再来回乱滑）：
-    1. 当前视口短暂等待刷新（移除后列表会上移）
-    2. 当前位置继续往下翻找
-    3. 仍没有 → 回顶，再整表往下翻找
-    """
-    label = name or uid
-
+    """定位下一位候选：当前位置短等 → 往下翻 → 回顶往下。"""
     if first_in_round:
-        print(f"定位 {label}：从顶部开始")
         scroll_to_top(page)
-        return search_uid_scrolling_down(page, uid, max_search_steps, label)
+        return search_uid_scrolling_down(page, uid, max_search_steps, name or uid)
 
-    # 1) 当前位置：只短等，避免“卡住不动”
-    for retry in range(2):
+    for _ in range(2):
         matched = find_visible_card_by_uid(page, uid)
         if matched is not None:
-            if retry:
-                print(f"定位 {label}：当前位置刷新后找到")
             return matched
         page.wait_for_timeout(300)
 
-    # 2) 当前位置往下
-    print(f"定位 {label}：当前位置未见，继续向下搜索…")
-    matched = search_uid_scrolling_down(page, uid, min(8, max_search_steps), label)
+    matched = search_uid_scrolling_down(page, uid, min(8, max_search_steps), name or uid)
     if matched is not None:
         return matched
 
-    # 3) 回顶全表向下
-    print(f"定位 {label}：回顶后向下搜索…")
     scroll_to_top(page)
-    return search_uid_scrolling_down(page, uid, max_search_steps, label)
+    return search_uid_scrolling_down(page, uid, max_search_steps, name or uid)
 
 
 def scan_candidates_from_top(
@@ -585,11 +553,11 @@ def scan_candidates_from_top(
 def collect_candidates(
     page: Page, max_scrolls: int, stop_after: int | None = None
 ) -> list[Candidate]:
-    """两阶段：先下拉加载完毕，再回顶按顺序一次性扫描候选。"""
-    print("阶段 1/2：下拉加载粉丝列表……")
+    """先预加载粉丝列表，再回顶扫描匹配候选。"""
+    print("阶段 1/2：预加载粉丝列表……")
     loaded = preload_fan_list(page, max_scrolls)
-    print(f"预加载完成，约 {loaded} 个粉丝卡片已载入。")
-    print("阶段 2/2：回到顶部，按关注时间倒序扫描候选……")
+    print(f"预加载完成，约 {loaded} 个粉丝。")
+    print("阶段 2/2：回顶扫描候选……")
     scan_steps = max(max_scrolls * 8, 200)
     return scan_candidates_from_top(page, scan_steps, stop_after=stop_after)
 
@@ -653,13 +621,12 @@ def append_action(candidate: Candidate, status: str, detail: str = "") -> None:
 
 
 def remove_card(page: Page, card: Locator) -> None:
-    """移除粉丝；尽量不额外改滚动位置，避免移除后乱滑。"""
+    """打开菜单并确认移除粉丝。"""
     menu = card.locator("span.woo-pop-ctrl:has(i.woo-font--ellipsis)").first
     remove = None
     for attempt in range(3):
         page.keyboard.press("Escape")
         page.wait_for_timeout(80)
-        # 仅当菜单不在可视区域时才滚入视野，减少乱滑。
         try:
             box = menu.bounding_box()
             viewport = page.viewport_size or {"height": 900}
@@ -693,7 +660,6 @@ def remove_card(page: Page, card: Locator) -> None:
         dialog.wait_for(state="hidden", timeout=2000)
     except TimeoutError:
         page.wait_for_timeout(150)
-    # 关掉可能残留的浮层，保持当前滚动位置给下一次定位。
     page.keyboard.press("Escape")
     page.wait_for_timeout(250)
 
@@ -708,11 +674,7 @@ def clean_candidates(
     *,
     skip_initial_top: bool = False,
 ) -> tuple[int, int]:
-    """按锁定名单顺序移除。
-
-    定位：当前位置短等 → 当前位置往下 → 回顶往下。
-    移除后：不主动滚动，只短暂等待列表刷新。
-    """
+    """按名单顺序移除；成功后从名单落盘删除。"""
     removed = 0
     checked = 0
     locked_count = len(candidates)
@@ -734,8 +696,8 @@ def clean_candidates(
         checked += 1
         if matched_card is None:
             print(
-                f"停止：查找后仍找不到锁定候选 {expected.name}。"
-                f"剩余 {len(candidates)} 个将保留在候选名单中。"
+                f"停止：找不到候选 {expected.name}。"
+                f"剩余 {len(candidates)} 个保留在名单中。"
             )
             break
         try:
@@ -753,13 +715,12 @@ def clean_candidates(
                     f"[{done}/{target_total}] 已移除：{expected.name}；"
                     f"名单剩余 {len(candidates)} 个"
                 )
-            # 移除后停在原处短暂等待刷新，再进入下一位定位（由其自己决定是否下滑/回顶）。
             page.wait_for_timeout(int(random.uniform(min_delay, max_delay) * 1000))
         except Exception as exc:
             append_action(expected, "failed", str(exc))
             print(
                 f"停止：移除 {expected.uid} 失败：{exc}；"
-                f"剩余 {len(candidates)} 个将保留在候选名单中。",
+                f"剩余 {len(candidates)} 个保留在名单中。",
                 file=sys.stderr,
             )
             break
@@ -841,7 +802,7 @@ def run(args: argparse.Namespace) -> None:
                 print("登录准备完成，可以关闭浏览器。")
                 return
 
-            # 必须通过页面点击进入，微博才会初始化粉丝关系和排序状态。
+            # 通过页面点击进入，才能正确初始化粉丝关系与排序。
             fans_url = navigate_to_sorted_fans(page)
             print(f"已进入粉丝页：{fans_url}")
             wait_for_cards(page)
@@ -850,7 +811,7 @@ def run(args: argparse.Namespace) -> None:
                 candidates = collect_candidates(page, args.max_scrolls)
                 write_candidates(candidates)
                 print(f"扫描完成：{len(candidates)} 个候选。")
-                print(f"请先检查 {CANDIDATES_CSV}，确认后再运行 clean。")
+                print(f"结果：{CANDIDATES_CSV}")
                 return
 
             unlimited = args.limit is None
@@ -859,39 +820,37 @@ def run(args: argparse.Namespace) -> None:
             consecutive_no_progress = 0
             round_no = 0
 
-            # 首轮扫描锁定名单；之后失败重试只处理剩余候选，不再重新扫描。
             remaining_quota = None if unlimited else args.limit
             pending = collect_candidates(
                 page, args.max_scrolls, stop_after=remaining_quota
             )
             write_candidates(pending)
             if not pending:
-                print("没有找到可处理的匹配候选。")
+                print("没有找到匹配候选。")
             else:
                 print(f"已锁定候选 {len(pending)} 个。")
-                print("扫描完成，直接回到顶部开始取关（不再重新进入粉丝页）……")
+                print("回顶开始取关……")
                 scroll_to_top(page, settle_ms=600)
 
             while pending and (unlimited or total_removed < args.limit):
                 round_no += 1
                 if round_no > 1:
                     print(
-                        f"\n第 {round_no - 1} 轮未完成，回到顶部继续处理剩余 "
-                        f"{len(pending)} 个候选（不重新扫描、不重新进页）……"
+                        f"\n继续处理剩余 {len(pending)} 个候选（回顶，不重新扫描）……"
                     )
                     scroll_to_top(page, settle_ms=600)
                     wait_for_cards(page)
 
-                print(f"第 {round_no} 轮候选明细（共 {len(pending)} 个）：")
+                print(f"第 {round_no} 轮候选（共 {len(pending)} 个）：")
                 for index, candidate in enumerate(pending, start=1):
                     print(
-                        f"  {index}. 微博名字={candidate.name} | "
-                        f"来源={candidate.source} | 已回关=否"
+                        f"  {index}. {candidate.name} | "
+                        f"{candidate.source} | 未回关"
                     )
                 goal_text = "全部匹配" if unlimited else str(args.limit)
                 print(
-                    f"候选 {len(pending)} 个，总目标 {goal_text} 个，"
-                    f"已完成 {total_removed} 个。"
+                    f"候选 {len(pending)} 个，目标 {goal_text}，"
+                    f"已完成 {total_removed}。"
                 )
                 removed, checked = clean_candidates(
                     page,
@@ -910,16 +869,16 @@ def run(args: argparse.Namespace) -> None:
 
                 if consecutive_no_progress >= 3:
                     print(
-                        "连续 3 轮没有成功移除，停止任务，避免无限重试；"
-                        f"剩余 {len(pending)} 个仍保留在 {CANDIDATES_JSON}。"
+                        "连续 3 轮无进展，停止；"
+                        f"剩余 {len(pending)} 个在 {CANDIDATES_JSON}。"
                     )
                     break
 
             goal_summary = "全部匹配" if unlimited else str(args.limit)
             print(
-                f"任务完成：移除 {total_removed}/{goal_summary} 个，"
-                f"检查 {total_checked} 个候选；名单剩余 {len(pending)} 个；"
-                f"日志：{ACTION_LOG}"
+                f"完成：移除 {total_removed}/{goal_summary}，"
+                f"检查 {total_checked}；剩余 {len(pending)}；"
+                f"日志 {ACTION_LOG}"
             )
         finally:
             try:
